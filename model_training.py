@@ -5,13 +5,11 @@ from sklearn.metrics import root_mean_squared_error
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 
-# Get top 10 products by quantity sold
 def get_top_10_products(transactions1, transactions2):
     transactions = pd.concat([transactions1, transactions2])
     top_10_products = transactions.groupby('StockCode')['Quantity'].sum().nlargest(10).index
     return top_10_products
 
-# Get top 10 products by revenue
 def get_top_10_revenue_products(transactions1, transactions2, product_info):
     transactions = pd.concat([transactions1, transactions2])
     
@@ -26,7 +24,6 @@ def get_top_10_revenue_products(transactions1, transactions2, product_info):
     
     return top_10_revenue_products
 
-# Train and Forecast the model
 def train_forecast_model(transactions, selected_product):
     product_data = transactions[transactions['StockCode'] == selected_product]
     product_data = product_data.copy()
@@ -34,7 +31,6 @@ def train_forecast_model(transactions, selected_product):
     product_data = product_data.groupby('Date')['Quantity'].sum().reset_index()
     product_data = product_data.rename(columns={'Date': 'ds', 'Quantity': 'y'})
 
-    # Train-Test Split
     train_data = product_data.iloc[:-15]
     test_data = product_data.iloc[-15:]
 
@@ -67,7 +63,6 @@ def train_xgboost_model(transactions, customer_info, product_info):
     # Convert categorical variable 'Country' into numerical values using one-hot encoding
     X = pd.get_dummies(X, columns=['Country'], drop_first=True)
 
-    # Train-test split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # Initialize and train XGBoost model
