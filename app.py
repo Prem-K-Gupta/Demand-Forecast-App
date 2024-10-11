@@ -1,68 +1,160 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import statsmodels.api as sm
-from model_training import train_forecast_model, get_top_10_products, get_top_10_revenue_products, train_xgboost_model
-from data_preprocessing import load_and_preprocess_data
-
-st.title("Demand Forecasting System")
-st.sidebar.title("Input Options")
+from prophet import Prophet
+from sklearn.metrics import mean_absolute_error,root_mean_squared_error
+import numpy as np
 
 @st.cache_data
 def load_data():
-    transactions1, transactions2, product_info, customer_info, customer_summary = load_and_preprocess_data()
-    return transactions1, transactions2, product_info, customer_info, customer_summary
+    transactions_01 = pd.read_csv('datasets/Transactional_data_retail_01.csv')
+    transactions_02 = pd.read_csv('datasets/Transactional_data_retail_02.csv')
+    transactions = pd.concat([transactions_01, transactions_02], ignore_index=True)
 
-transactions1, transactions2, product_info, customer_info, customer_summary = load_data()
+    transactions['InvoiceDate'] = pd.to_datetime(transactions['InvoiceDate'], errors='coerce', dayfirst=True)
 
-st.write("## Customer-Level Summary Statistics")
-st.write(customer_summary.head())
+    transactions.dropna(subset=['InvoiceDate'], inplace=True)
 
-top_10_products = get_top_10_products(transactions1, transactions2)
+    transactions['Revenue'] = transactions['Quantity'] * transactions['Price']
 
-top_10_revenue_products = get_top_10_revenue_products(transactions1, transactions2, product_info)
+    return transactions
 
-selected_product = st.sidebar.selectbox("Select a Stock Code (Top 10 by Quantity):", top_10_products)
-selected_revenue_product = st.sidebar.selectbox("Select a Stock Code (Top 10 by Revenue):", top_10_revenue_products)
+# Streamlit App
+def main():
+    st.sidebar.title("Input Options")
+    
+    transactions = load_data()
 
-st.write(f"## Demand Forecasting for {selected_product}")
-model, forecast, train_residuals, test_residuals, y_true, y_pred = train_forecast_model(transactions1, selected_product)
+    analysis_type = st.sidebar.radio(
+        "Choose Analysis Type:",
+        ("Exploratory Data Analysis (EDA)", "Demand Forecasting")
+    )
 
-st.write("### Forecast Plot")
-fig1 = model.plot(forecast)
-st.pyplot(fig1)
+    # EDA Section
+    if analysis_type == "Exploratory Data Analysis (EDA)":
+        st.title("Exploratory Data Analysis (EDA)")
 
-st.write("### ACF and PACF Plots")
-def plot_acf_pacf(data):
-    fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+        st.subheader("Customer-Level Summary Statistics")
+        customer_summary = transactions.groupby('Customer ID').agg({'Quantity': 'sum', 'Revenue': 'sum'}).reset_index()
+        st.write(customer_summary.describe())
 
-    sm.graphics.tsa.plot_acf(data, ax=axs[0])
-    axs[0].set_title('ACF Plot')
+        st.subheader("Product-Level Summary Statistics")
+        product_summary = transactions.groupby('StockCode').agg({'Quantity': 'sum', 'Revenue': 'sum'}).reset_index()
+        st.write(product_summary.describe())
 
-    sm.graphics.tsa.plot_pacf(data, ax=axs[1])
-    axs[1].set_title('PACF Plot')
+        # Visualizations
+        st.subheader("Top 10 Products by Quantity Sold")
+        top_10_products_quantity = product_summary.nlargest(10, 'Quantity')
+        plt.figure(figsize=(10, 5))
+        plt.bar(top_10_products_quantity['StockCode'], top_10_products_quantity['Quantity'], color='blue')
+        plt.xlabel('Stock Code')
+        plt.ylabel('Total Quantity Sold')
+        plt.title('Top 10 Products by Quantity Sold')
+        st.pyplot(plt)
 
-    st.pyplot(fig)
+        st.subheader("Top 10 Products by Revenue")
+        top_10_products_revenue = product_summary.nlargest(10, 'Revenue')
+        plt.figure(figsize=(10, 5))
+        plt.bar(top_10_products_revenue['StockCode'], top_10_products_revenue['Revenue'], color='green')
+        plt.xlabel('Stock Code')
+        plt.ylabel('Total Revenue')
+        plt.title('Top 10 Products by Revenue')
+        st.pyplot(plt)
 
-plot_acf_pacf(pd.Series(forecast['yhat']))
+    # Demand Forecasting Section
+    elif analysis_type == "Demand Forecasting":
+        # Identify top 10 products by quantity sold
+        top_10_stock_codes = transactions.groupby('StockCode')['Quantity'].sum().sort_values(ascending=False).head(10).index.tolist()
 
-st.write("### Error Distribution")
-fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+        stock_code = st.sidebar.selectbox('Select a Stock Code:', top_10_stock_codes)
 
-axs[0].hist(train_residuals, bins=15, color='green', alpha=0.7)
-axs[0].set_title('Training Error Distribution')
+        # Title and sub-title
+        st.title('Demand Forecasting')
+        st.subheader(f'Demand Overview for {stock_code}')
 
-axs[1].hist(test_residuals, bins=15, color='red', alpha=0.7)
-axs[1].set_title('Testing Error Distribution')
+        # Load historical data for the selected product
+        product_data = transactions[transactions['StockCode'] == stock_code].set_index('InvoiceDate')
+        product_sales = product_data['Quantity'].resample('W').sum().fillna(0)
 
-st.pyplot(fig)
+        # Prepare data for Prophet
+        product_sales_df = product_sales.reset_index()
+        product_sales_df.columns = ['ds', 'y']  
 
-xgb_model, rmse_xgb = train_xgboost_model(transactions1, customer_info, product_info)
-st.write(f"XGBoost RMSE for demand prediction: {rmse_xgb:.2f}")
+        train_data = product_sales_df[:-15]
+        test_data = product_sales_df[-15:]
+        
+        model = Prophet(
+            changepoint_prior_scale=0.5,   
+            seasonality_mode='multiplicative' 
+        )
 
-st.write("### Forecasted Demand for the Next 15 Weeks")
-download_data = forecast[['ds', 'yhat']].tail(15)
-st.write(download_data)
+        model.add_seasonality(name='weekly', period=7, fourier_order=3)
+        model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
 
-csv = download_data.to_csv(index=False)
-st.download_button(label="Download Forecast Data as CSV", data=csv, file_name='forecast.csv', mime='text/csv')
+        model.fit(train_data)
+
+        future_train = model.make_future_dataframe(periods=15, freq='W')
+
+        forecast = model.predict(future_train)
+
+        forecast_train = forecast[forecast['ds'] <= train_data['ds'].max()]
+        forecast_test = forecast[forecast['ds'] > train_data['ds'].max()]
+
+        # Plot Actual vs Predicted
+        st.write("Actual vs Predicted Demand")
+        plt.figure(figsize=(10, 6))
+        plt.plot(train_data['ds'], train_data['y'], 'bo-', label='Train Actual Demand')
+        plt.plot(forecast_train['ds'], forecast_train['yhat'], 'r-', label='Train Predicted Demand')
+        plt.plot(test_data['ds'], test_data['y'], 'yo-', label='Test Actual Demand')
+        plt.plot(forecast_test['ds'], forecast_test['yhat'], 'go-', label='Test Predicted Demand')
+        plt.xlabel('Date')
+        plt.ylabel('Demand')
+        plt.title(f'Actual Vs Predicted Demand for {stock_code}')
+        plt.legend()
+        st.pyplot(plt)
+
+        # Calculate Errors
+        train_mae = mean_absolute_error(train_data['y'], forecast_train['yhat'][:len(train_data)])
+        train_rmse = np.sqrt(root_mean_squared_error(train_data['y'], forecast_train['yhat'][:len(train_data)]))
+        test_mae = mean_absolute_error(test_data['y'], forecast_test['yhat'][:len(test_data)])
+        test_rmse = np.sqrt(root_mean_squared_error(test_data['y'], forecast_test['yhat'][:len(test_data)]))
+
+        st.write(f"Training MAE: {train_mae:.2f}")
+        st.write(f"Training RMSE: {train_rmse:.2f}")
+        st.write(f"Testing MAE: {test_mae:.2f}")
+        st.write(f"Testing RMSE: {test_rmse:.2f}")
+
+        # Plot Training and Testing Error Distributions
+        st.write("Error Distribution")
+
+        # Training Error Histogram
+        train_errors = train_data['y'] - forecast_train['yhat'][:len(train_data)]
+        plt.figure(figsize=(6, 4))
+        plt.hist(train_errors, bins=20, color='green', alpha=0.7)
+        plt.title('Training Error Distribution')
+        plt.xlabel('Error')
+        plt.ylabel('Frequency')
+        st.pyplot(plt)
+
+        # Testing Error Histogram
+        test_errors = test_data['y'] - forecast_test['yhat'][:len(test_data)]
+        plt.figure(figsize=(6, 4))
+        plt.hist(test_errors, bins=20, color='red', alpha=0.7)
+        plt.title('Testing Error Distribution')
+        plt.xlabel('Error')
+        plt.ylabel('Frequency')
+        st.pyplot(plt)
+
+        st.write("Download Forecast Data")
+        forecast_df = forecast[['ds', 'yhat']].tail(15)
+        forecast_df.columns = ['Date', 'Forecasted Demand']
+        csv = forecast_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Forecast as CSV",
+            data=csv,
+            file_name=f'forecast_{stock_code}.csv',
+            mime='text/csv'
+        )
+
+if __name__ == "__main__":
+    main()
